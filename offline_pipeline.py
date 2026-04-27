@@ -48,41 +48,35 @@ def load_and_preprocess(filepaths=None):
             
     df = pd.concat(dfs, ignore_index=True)
     
-    # Extract codes and names, defaulting if needed
-    for col in ["sub_district", "mandal", "district", "district_x", "district_y", "diagnosis", "diagnosis_code"]:
-        if col not in df.columns:
-            df[col] = np.nan
-            
-    df['mandal_clean'] = df['sub_district'].fillna(df['mandal'])
-    df['district_clean'] = df['district_y'].fillna(df['district_x']).fillna(df['district'])
-    df['diagnosis_clean'] = df['diagnosis_code'].fillna(df['diagnosis'])
+    # 1. Mandal Mapping
+    m_name_col = "sub_district" if "sub_district" in df.columns else "mandal"
+    m_code_col = "sub_district_code" if "sub_district_code" in df.columns else "mandal_code"
     
-    # 1. Mandal Mapping using code (assumes sub_district_code or mandal_code exists)
-    mandal_code_col = 'sub_district_code' if 'sub_district_code' in df.columns else ('mandal_code' if 'mandal_code' in df.columns else None)
-    if mandal_code_col:
-        m_map = df.dropna(subset=[mandal_code_col, 'mandal_clean']).groupby(mandal_code_col)['mandal_clean'].first().to_dict()
-        df['mandal'] = df['mandal_clean'].fillna(df[mandal_code_col].map(m_map)).fillna('Unknown')
-    else:
-        df['mandal'] = df['mandal_clean'].fillna('Unknown')
+    if m_code_col in df.columns and m_name_col in df.columns:
+        m_map = df.dropna(subset=[m_code_col, m_name_col]).groupby(m_code_col)[m_name_col].first().to_dict()
+        df[m_name_col] = df[m_name_col].fillna(df[m_code_col].map(m_map))
+    df['mandal'] = df.get(m_name_col, pd.Series(dtype=str)).fillna('Unknown')
 
-    # 2. District Mapping using code
-    dist_code_col = 'district_code' if 'district_code' in df.columns else None
-    if dist_code_col:
-        d_map = df.dropna(subset=[dist_code_col, 'district_clean']).groupby(dist_code_col)['district_clean'].first().to_dict()
-        df['district'] = df['district_clean'].fillna(df[dist_code_col].map(d_map)).fillna('Unknown')
-    else:
-        df['district'] = df['district_clean'].fillna('Unknown')
+    # 2. District Mapping
+    if "district_y" in df.columns and "district_x" in df.columns:
+        df["district"] = df["district_y"].fillna(df["district_x"]).fillna(df.get("district"))
+    
+    d_name_col = "district" if "district" in df.columns else "district_y"
+    d_code_col = "district_code"
+    if d_code_col in df.columns and d_name_col in df.columns:
+        d_map = df.dropna(subset=[d_code_col, d_name_col]).groupby(d_code_col)[d_name_col].first().to_dict()
+        df[d_name_col] = df[d_name_col].fillna(df[d_code_col].map(d_map))
+    df['district'] = df.get(d_name_col, pd.Series(dtype=str)).fillna('Unknown')
         
-    # 3. Diagnosis Mapping using code
-    diag_code_col = 'diagnosis_code' if 'diagnosis_code' in df.columns else ('diagnosis_id' if 'diagnosis_id' in df.columns else None)
-    if diag_code_col:
-        diag_map = df.dropna(subset=[diag_code_col, 'diagnosis_clean']).groupby(diag_code_col)['diagnosis_clean'].first().to_dict()
-        df['diagnosis_final'] = df['diagnosis_clean'].fillna(df[diag_code_col].map(diag_map)).astype(str).str.strip()
-    else:
-        df['diagnosis_final'] = df['diagnosis_clean'].astype(str).str.strip()
+    # 3. Diagnosis Mapping
+    diag_code_col = "diagnosis" if "diagnosis" in df.columns else "diagnosis_code"
+    diag_name_col = "diagnosis_name"
+    if diag_code_col in df.columns and diag_name_col in df.columns:
+        diag_map = df.dropna(subset=[diag_code_col, diag_name_col]).groupby(diag_code_col)[diag_name_col].first().to_dict()
+        df[diag_name_col] = df[diag_name_col].fillna(df[diag_code_col].map(diag_map))
         
-    df['diagnosis_code'] = df['diagnosis_final'] # replace target
-    df['event_date'] = pd.to_datetime(df['timestamp'], errors='coerce')
+    df['diagnosis_code'] = df.get(diag_code_col, pd.Series(dtype=str)).astype(str).str.strip()
+    df['event_date'] = pd.to_datetime(df.get('timestamp'), errors='coerce')
     
     # Filter only to tracked diseases via dict
     tracked_codes = []
