@@ -81,7 +81,8 @@ def load_and_preprocess(filepaths=None):
 
     # 2. District Mapping
     if "district_y" in df.columns and "district_x" in df.columns:
-        df["district"] = df["district_y"].fillna(df["district_x"]).fillna(df.get("district"))
+        tmp_dist = df["district_y"].fillna(df["district_x"])
+        df["district"] = tmp_dist.fillna(df["district"]) if "district" in df.columns else tmp_dist
     
     d_name_col = "district" if "district" in df.columns else "district_y"
     d_code_col = "district_code"
