@@ -83,14 +83,27 @@ def get_mandal_timeseries(df):
     return pd.DataFrame()
 
 # %% [markdown]
-# ## 3. Robust ARIMA & Forecasting (Auto-Optimized)
-# Using `pmdarima` grid-searches to generate mathematically proven curves.
+# ## 3. Dynamic Multi-Model Forecasting (The Racing Engine)
+# Competes ARIMA, XGBoost, Holt-Winters, ETS, and UCM (BSTS-equivalent) evaluating validation holdouts to extract the lowest RMSE per Mandal dynamically.
 
 # %%
+import xgboost as xgb
+from sklearn.metrics import mean_squared_error
+from statsmodels.tsa.holtwinters import ExponentialSmoothing
+from statsmodels.tsa.statespace.structural import UnobservedComponents
+from pmdarima.preprocessing import FourierFeaturizer
+
+def extract_xgb_features(y_series, lags=4):
+    """Generates autoregressive lag features for the XGBoost supervised mapping."""
+    df = pd.DataFrame({'y': y_series})
+    for i in range(1, lags + 1):
+        df[f'lag_{i}'] = df['y'].shift(i)
+    return df.dropna()
+
 def run_mandal_forecasts(ts_mandal, forecast_horizon=4):
     """
-    Runs an Auto-ARIMA model evaluated through AIC scores
-    for every localized mandal stream.
+    Races multiple models using a walk-forward holdout validation.
+    The model with the best RMSE exclusively generates the predictions for the UI.
     """
     forecast_results = []
     
@@ -99,44 +112,125 @@ def run_mandal_forecasts(ts_mandal, forecast_horizon=4):
         y = group['case_count'].astype(float).values
         dates = group['period'].tolist()
         
-        if len(y) < 10:
-            continue # Insufficient data for Auto-ARIMA to converge
+        # We need sufficient data for a meaningful 4-week holdout test (e.g. at least 15 weeks)
+        if len(y) < 15:
+            continue
             
-        # 1. Stationarity Check (via Augmented Dickey-Fuller Test)
+        train = y[:-forecast_horizon]
+        test = y[-forecast_horizon:]
+        
+        models_performance = {}
+        predictions_future = {}
+        
+        # --- 1. Auto-ARIMA ---
         try:
-            adf_result = adfuller(y)
-            needs_differencing = adf_result[1] > 0.05
-        except:
-            needs_differencing = True
+            # Stationarity Check mathematically handles the trend differencing parameter (d)
+            needs_diff = adfuller(train)[1] > 0.05
             
-        # 2. Robust Auto-ARIMA fitting
+            # Using Exogenous Fourier Terms for Robust Weekly Seasonality (Annual = 52.14 weeks)
+            if len(train) > 52:
+                # Extracts 2 pairs of sine/cosine waves representing the 52-week seasonal cycle
+                fourier = FourierFeaturizer(m=52.14, k=2)
+                train_y, train_X = fourier.fit_transform(train)
+                
+                # Model uses automated AIC grid search over p, q parameters incorporating Fourier X explicitly
+                arima_model = pm.auto_arima(train_y, X=train_X, d=1 if needs_diff else 0, seasonal=False, stepwise=True, suppress_warnings=True)
+                
+                # Transform needs dummy indices length equal to forecast_horizon to generate the next wave points
+                _, test_X = fourier.transform(np.zeros(len(test)))
+                arima_preds = arima_model.predict(n_periods=forecast_horizon, X=test_X)
+            else:
+                # Fallback to plain auto_arima parameter optimization if insufficient data for robust annual seasonality
+                arima_model = pm.auto_arima(train, d=1 if needs_diff else 0, seasonal=False, stepwise=True, suppress_warnings=True)
+                arima_preds = arima_model.predict(n_periods=forecast_horizon)
+                
+            models_performance['ARIMA'] = np.sqrt(mean_squared_error(test, arima_preds))
+            
+            # Refit on full series to generate final Future Predictions
+            if len(y) > 52:
+                fourier_full = FourierFeaturizer(m=52.14, k=2)
+                full_y, full_X = fourier_full.fit_transform(y)
+                refit_arima = pm.auto_arima(full_y, X=full_X, d=1 if needs_diff else 0, seasonal=False, stepwise=True, suppress_warnings=True)
+                
+                _, future_X = fourier_full.transform(np.zeros(forecast_horizon))
+                predictions_future['ARIMA'] = refit_arima.predict(n_periods=forecast_horizon, X=future_X)
+            else:
+                refit_arima = pm.auto_arima(y, d=1 if needs_diff else 0, seasonal=False, stepwise=True, suppress_warnings=True)
+                predictions_future['ARIMA'] = refit_arima.predict(n_periods=forecast_horizon)
+        except: pass
+        
+        # --- 2. Holt-Winters (Exponential Smoothing / ETS) ---
         try:
-            model = pm.auto_arima(
-                y,
-                d=1 if needs_differencing else 0,
-                seasonal=False, # Fourier terms or higher period vectors are suggested for multi-seasonal patterns
-                stepwise=True,
-                suppress_warnings=True,
-                max_p=3, max_q=3,
-                information_criterion='aic'
-            )
+            hw_model = ExponentialSmoothing(train, trend='add', seasonal=None, initialization_method="estimated").fit()
+            hw_preds = hw_model.forecast(forecast_horizon)
+            models_performance['Holt-Winters'] = np.sqrt(mean_squared_error(test, hw_preds))
             
-            preds, conf_int = model.predict(n_periods=forecast_horizon, return_conf_int=True, alpha=0.05)
+            refit_hw = ExponentialSmoothing(y, trend='add', seasonal=None, initialization_method="estimated").fit()
+            predictions_future['Holt-Winters'] = refit_hw.forecast(forecast_horizon)
+        except: pass
+
+        # --- 3. UCM (Unobserved Components Model / BSTS equivalent) ---
+        try:
+            ucm_model = UnobservedComponents(train, level='local linear trend').fit(disp=False)
+            ucm_preds = ucm_model.forecast(steps=forecast_horizon)
+            models_performance['UCM'] = np.sqrt(mean_squared_error(test, ucm_preds))
             
-            # Predict bounds
-            last_date = dates[-1]
-            future_dates = [last_date + timedelta(weeks=i+1) for i in range(forecast_horizon)]
+            refit_ucm = UnobservedComponents(y, level='local linear trend').fit(disp=False)
+            predictions_future['UCM'] = refit_ucm.forecast(steps=forecast_horizon)
+        except: pass
+        
+        # --- 4. XGBoost Regressor ---
+        try:
+            feat_df = extract_xgb_features(train, lags=4)
+            if not feat_df.empty:
+                X_train, Y_train = feat_df.drop(columns=['y']), feat_df['y']
+                xgb_model = xgb.XGBRegressor(objective='reg:squarederror', n_estimators=50, random_state=42)
+                xgb_model.fit(X_train, Y_train)
+                
+                # Recursive forecast for holdout test set
+                xgb_preds = []
+                last_lags = train[-4:].tolist()
+                for _ in range(forecast_horizon):
+                    pred = xgb_model.predict(np.array([last_lags[::-1]]))[0]
+                    xgb_preds.append(pred)
+                    last_lags.append(pred)
+                    last_lags.pop(0)
+                models_performance['XGBoost'] = np.sqrt(mean_squared_error(test, xgb_preds))
+                
+                # Refit blindly on the full series
+                feat_full = extract_xgb_features(y, lags=4)
+                X_full, Y_full = feat_full.drop(columns=['y']), feat_full['y']
+                refit_xgb = xgb.XGBRegressor(objective='reg:squarederror', n_estimators=50, random_state=42)
+                refit_xgb.fit(X_full, Y_full)
+                
+                final_xgb_preds = []
+                last_lags_f = y[-4:].tolist()
+                for _ in range(forecast_horizon):
+                    pred = refit_xgb.predict(np.array([last_lags_f[::-1]]))[0]
+                    final_xgb_preds.append(pred)
+                    last_lags_f.append(pred)
+                    last_lags_f.pop(0)
+                predictions_future['XGBoost'] = final_xgb_preds
+        except: pass
+
+        # --- Dynamic Selection Protocol ---
+        if not models_performance:
+            continue
             
-            forecast_results.append({
-                "mandal": mandal,
-                "disease": DISEASE_CODES[d_key]['name'],
-                "dates": [d.strftime("%Y-%m-%d") for d in future_dates],
-                "predictions": [max(0, round(float(p), 1)) for p in preds],
-                "lower_95": [max(0, round(float(c[0]), 1)) for c in conf_int],
-                "upper_95": [max(0, round(float(c[1]), 1)) for c in conf_int]
-            })
-        except Exception as e:
-            print(f"Skipping {mandal} - {d_key} due to ARIMA convergence failure: {e}")
+        # The ultimate winner for this specific mandal is whichever model proved the lowest RMSE mathematically
+        best_model_name = min(models_performance, key=models_performance.get)
+        best_preds = predictions_future[best_model_name]
+        
+        last_date = dates[-1]
+        future_dates = [last_date + timedelta(weeks=i+1) for i in range(forecast_horizon)]
+        
+        forecast_results.append({
+            "mandal": mandal,
+            "disease": DISEASE_CODES[d_key]['name'],
+            "model_used": best_model_name,
+            "dates": [d.strftime("%Y-%m-%d") for d in future_dates],
+            "predictions": [max(0, round(float(p), 1)) for p in best_preds]
+        })
             
     return forecast_results
 
