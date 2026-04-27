@@ -716,32 +716,35 @@ def render_geographic(df_clean, ts_district_weekly, selected_diseases):
         if mode == "Historical Spread (Animated)":
             geo_data = d_data.dropna(subset=["latitude", "longitude", "event_date"]).copy()
             # Group by year-month for animation
-            geo_data["Month"] = geo_data["event_date"].dt.to_period("M").dt.strftime("%Y-%m")
-            geo_data = geo_data.sort_values("Month")
-            
-            mandal_geo = geo_data.groupby(["Month", "mandal", "district"]).agg({
-                "latitude": "first",
-                "longitude": "first",
-                "op_id": "count" if "op_id" in geo_data.columns else "size"
-            }).reset_index().rename(columns={"op_id": "cases", 0: "cases"})
-            
-            # Ensure an empty df doesn't break
-            max_cases = mandal_geo["cases"].max() if not mandal_geo.empty else 10
-            
-            fig_map = px.scatter_mapbox(
-                mandal_geo, 
-                lat="latitude", lon="longitude", 
-                size="cases", color="cases",
-                hover_name="mandal", 
-                hover_data={"district": True, "cases": True, "latitude": False, "longitude": False},
-                animation_frame="Month",
-                animation_group="mandal",
-                color_continuous_scale="Reds", 
-                size_max=40, zoom=5.5,
-                center={"lat": 16.5, "lon": 80.0},
-                mapbox_style="carto-positron",
-                range_color=[0, max_cases]
-            )
+            if not geo_data.empty:
+                geo_data["Month"] = geo_data["event_date"].dt.to_period("M").dt.strftime("%Y-%m")
+                geo_data = geo_data.sort_values("Month")
+                
+                mandal_geo = geo_data.groupby(["Month", "mandal", "district"]).agg({
+                    "latitude": "first",
+                    "longitude": "first",
+                    "op_id": "count" if "op_id" in geo_data.columns else "size"
+                }).reset_index().rename(columns={"op_id": "cases", 0: "cases"})
+                
+                max_cases = mandal_geo["cases"].max() if not mandal_geo.empty else 10
+                
+                fig_map = px.scatter_mapbox(
+                    mandal_geo, 
+                    lat="latitude", lon="longitude", 
+                    size="cases", color="cases",
+                    hover_name="mandal", 
+                    hover_data={"district": True, "cases": True, "latitude": False, "longitude": False},
+                    animation_frame="Month",
+                    animation_group="mandal",
+                    color_continuous_scale="Reds", 
+                    size_max=40, zoom=5.5,
+                    center={"lat": 16.5, "lon": 80.0},
+                    mapbox_style="carto-positron",
+                    range_color=[0, max_cases]
+                )
+            else:
+                fig_map = go.Figure()
+                st.info("No geospatial data available for animation.")
         else:
             geo_data = recent_d_data.dropna(subset=["latitude", "longitude"])
             if not geo_data.empty:

@@ -6,10 +6,12 @@ function GeospatialMap({ data }) {
   // Center roughly on Andhra Pradesh coordinates
   const apCenter = [16.5062, 80.6480];
   
-  if (!data || data.length === 0) {
+  const validData = data ? data.filter(point => point.lat != null && point.lng != null) : [];
+  
+  if (validData.length === 0) {
     return (
       <div style={{ color: 'var(--text-secondary)', padding: '2rem', textAlign: 'center', border: '1px dashed rgba(255,255,255,0.1)', borderRadius: '12px' }}>
-        No geospatial data coordinates available for rendering map.
+        No geospatial data coordinates available for compiling the map. (Alerts are still active below)
       </div>
     );
   }
@@ -22,7 +24,7 @@ function GeospatialMap({ data }) {
           attribution='&copy; <a href="https://carto.com/attributions">CARTO</a>'
           url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
         />
-        {data.map((point, idx) => (
+        {validData.map((point, idx) => (
           <CircleMarker 
              key={idx}
              center={[point.lat, point.lng]}

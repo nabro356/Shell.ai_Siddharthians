@@ -24,17 +24,65 @@ from config import DISEASE_CODES
 # Correcting columns for the incoming dataframe to route into standard keys.
 
 # %%
-def load_and_preprocess(filepath="raw_data.csv"):
+import glob
+
+def load_and_preprocess(filepaths=None):
     """
-    Standardizes the new df format (longitude, latitude, sub_district -> mandal, diagnosis -> diagnosis_code)
+    Standardizes the new df format and maps names based on codes globally within the dataset.
     """
-    df = pd.read_csv(filepath)
+    if filepaths is None:
+        filepaths = ["raw_data.csv"] # default fallback
+        
+    dfs = []
+    for fp in filepaths:
+        if os.path.exists(fp):
+            dfs.append(pd.read_csv(fp, dtype=str))
     
-    # Core Mapping
-    df['mandal'] = df['sub_district'].fillna(df.get('mandal', 'Unknown')) 
-    df['district'] = df['district_y'].fillna(df.get('district_x', 'Unknown'))
-    df['diagnosis_code'] = df['diagnosis'].astype(str).str.strip()
-    df['event_date'] = pd.to_datetime(df['timestamp'])
+    if not dfs:
+        # Check for matching pattern like 2024.csv, 2025.csv
+        csv_files = glob.glob("*202*.csv")
+        if csv_files:
+            dfs = [pd.read_csv(f, dtype=str) for f in csv_files]
+        else:
+            raise ValueError("No data files provided or found.")
+            
+    df = pd.concat(dfs, ignore_index=True)
+    
+    # Extract codes and names, defaulting if needed
+    for col in ["sub_district", "mandal", "district", "district_x", "district_y", "diagnosis", "diagnosis_code"]:
+        if col not in df.columns:
+            df[col] = np.nan
+            
+    df['mandal_clean'] = df['sub_district'].fillna(df['mandal'])
+    df['district_clean'] = df['district_y'].fillna(df['district_x']).fillna(df['district'])
+    df['diagnosis_clean'] = df['diagnosis_code'].fillna(df['diagnosis'])
+    
+    # 1. Mandal Mapping using code (assumes sub_district_code or mandal_code exists)
+    mandal_code_col = 'sub_district_code' if 'sub_district_code' in df.columns else ('mandal_code' if 'mandal_code' in df.columns else None)
+    if mandal_code_col:
+        m_map = df.dropna(subset=[mandal_code_col, 'mandal_clean']).groupby(mandal_code_col)['mandal_clean'].first().to_dict()
+        df['mandal'] = df['mandal_clean'].fillna(df[mandal_code_col].map(m_map)).fillna('Unknown')
+    else:
+        df['mandal'] = df['mandal_clean'].fillna('Unknown')
+
+    # 2. District Mapping using code
+    dist_code_col = 'district_code' if 'district_code' in df.columns else None
+    if dist_code_col:
+        d_map = df.dropna(subset=[dist_code_col, 'district_clean']).groupby(dist_code_col)['district_clean'].first().to_dict()
+        df['district'] = df['district_clean'].fillna(df[dist_code_col].map(d_map)).fillna('Unknown')
+    else:
+        df['district'] = df['district_clean'].fillna('Unknown')
+        
+    # 3. Diagnosis Mapping using code
+    diag_code_col = 'diagnosis_code' if 'diagnosis_code' in df.columns else ('diagnosis_id' if 'diagnosis_id' in df.columns else None)
+    if diag_code_col:
+        diag_map = df.dropna(subset=[diag_code_col, 'diagnosis_clean']).groupby(diag_code_col)['diagnosis_clean'].first().to_dict()
+        df['diagnosis_final'] = df['diagnosis_clean'].fillna(df[diag_code_col].map(diag_map)).astype(str).str.strip()
+    else:
+        df['diagnosis_final'] = df['diagnosis_clean'].astype(str).str.strip()
+        
+    df['diagnosis_code'] = df['diagnosis_final'] # replace target
+    df['event_date'] = pd.to_datetime(df['timestamp'], errors='coerce')
     
     # Filter only to tracked diseases via dict
     tracked_codes = []
@@ -59,6 +107,8 @@ def get_mandal_timeseries(df):
     """
     Aggregates cases by (Mandal, Disease, Week)
     """
+    if df is None or df.empty:
+        return pd.DataFrame()
     df['period'] = df['event_date'].dt.to_period('W').apply(lambda r: r.start_time)
     
     # Weekly aggregate per mandal per disease
@@ -104,8 +154,22 @@ def run_mandal_forecasts(ts_mandal, forecast_horizon=4):
     """
     Races multiple models using a walk-forward holdout validation.
     The model with the best RMSE exclusively generates the predictions for the UI.
+    Includes insights parsed implicitly from prior EDA analyses.
     """
+    if ts_mandal is None or ts_mandal.empty:
+        return []
+
     forecast_results = []
+    
+    # Read EDA results to guide model selection dynamically
+    overdispersed_diseases = []
+    try:
+        eda_stats = pd.read_csv("eda_output/time_series_stats.csv")
+        for _, row in eda_stats.iterrows():
+            if "overdispersed" in str(row.get("distribution_hint", "")):
+                overdispersed_diseases.append(row["disease_key"])
+    except:
+        pass
     
     for (mandal, d_key), group in ts_mandal.groupby(['mandal', 'disease_key']):
         group = group.sort_values('period')
@@ -178,6 +242,37 @@ def run_mandal_forecasts(ts_mandal, forecast_horizon=4):
             refit_ucm = UnobservedComponents(y, level='local linear trend').fit(disp=False)
             predictions_future['UCM'] = refit_ucm.forecast(steps=forecast_horizon)
         except: pass
+
+        # --- NegBin GLM Pipeline dynamically invoked for Overdispersed profiles ---
+        if d_key in overdispersed_diseases and len(train) > 10:
+            try:
+                # Basic NegBin logic wrapper
+                df_nb = pd.DataFrame({'case_count': y})
+                df_nb['lag_1'] = df_nb['case_count'].shift(1)
+                df_nb['lag_2'] = df_nb['case_count'].shift(2)
+                df_nb = df_nb.dropna()
+                if not df_nb.empty:
+                    X_train_nb = sm.add_constant(df_nb[['lag_1', 'lag_2']].iloc[:-forecast_horizon])
+                    Y_train_nb = df_nb['case_count'].iloc[:-forecast_horizon]
+                    if len(X_train_nb) > 5:
+                        model_nb = sm.GLM(Y_train_nb, X_train_nb, family=sm.families.NegativeBinomial(alpha=1.0)).fit()
+                        
+                        # Test forecast
+                        X_test_nb = sm.add_constant(df_nb[['lag_1', 'lag_2']].iloc[-forecast_horizon:], has_constant='add')
+                        preds_nb = model_nb.predict(X_test_nb)
+                        models_performance['NegBin GLM'] = np.sqrt(mean_squared_error(test[-len(preds_nb):], preds_nb))
+                        
+                        # Future Forecast Needs basic recursive stepping but for simplicity we rely recursively 
+                        # just like XGBoost
+                        final_nb_preds = []
+                        last_lags = y[-2:].tolist()
+                        for _ in range(forecast_horizon):
+                            pred_val = model_nb.predict([1, last_lags[1], last_lags[0]])[0]
+                            final_nb_preds.append(pred_val)
+                            last_lags.append(pred_val)
+                            last_lags.pop(0)
+                        predictions_future['NegBin GLM'] = final_nb_preds
+            except: pass
         
         # --- 4. XGBoost Regressor ---
         try:
@@ -273,15 +368,26 @@ def generate_frontend_assets(df, ts, forecasts):
 
 # %%
 if __name__ == "__main__":
-    print("Phase 1: Loading raw schema...")
-    # WARNING: Update the raw_data.csv path specifically to where you store your incoming data table
-    # df = load_and_preprocess("raw_data.csv")
+    import sys
+    print("Phase 1: Loading raw schema and merging multi-year sets...")
+    # The default can look for multi-year files recursively
+    df = load_and_preprocess(["2024.csv", "2025.csv"])
     
-    # print("Phase 2: Aggregating temporal mandal streams...")
-    # ts_mandal = get_mandal_timeseries(df)
-    
-    # print("Phase 3: Deploying Auto-ARIMA pipelines natively...")
-    # forecasts = run_mandal_forecasts(ts_mandal, forecast_horizon=4)
-    
-    # print("Phase 4: Converting formats and dumping JSONs...")
-    # generate_frontend_assets(df, ts_mandal, forecasts)
+    if not df.empty:
+        print("Phase 1.5: Executing EDA Runner to identify model characteristics (Overdispersion, Missing Vitals)...")
+        try:
+            from eda_runner import run_full_eda
+            run_full_eda(df)
+        except Exception as e:
+            print(f"Skipping complete EDA output generation due to dependencies: {e}")
+            
+        print("Phase 2: Aggregating temporal mandal streams...")
+        ts_mandal = get_mandal_timeseries(df)
+        
+        print("Phase 3: Deploying Auto-ARIMA & other models natively...")
+        forecasts = run_mandal_forecasts(ts_mandal, forecast_horizon=4)
+        
+        print("Phase 4: Converting formats and dumping JSONs...")
+        generate_frontend_assets(df, ts_mandal, forecasts)
+    else:
+        print("Terminating pipeline: Loaded dataframe is completely empty.")
