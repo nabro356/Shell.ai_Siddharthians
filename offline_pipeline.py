@@ -48,11 +48,17 @@ def load_and_preprocess(filepaths=None):
             
     df = pd.concat(dfs, ignore_index=True)
     
+    # Extract codes and names, defaulting if needed
+    for col in ["sub_district", "mandal", "district", "district_x", "district_y", "diagnosis", "diagnosis_code"]:
+        if col not in df.columns:
+            df[col] = np.nan
+            
     # 1. Mandal Mapping
-    m_name_col = "sub_district" if "sub_district" in df.columns else "mandal"
+    df["mandal_combined"] = df["sub_district"].fillna(df["mandal"])
+    m_name_col = "mandal_combined"
     m_code_col = "sub_district_code" if "sub_district_code" in df.columns else "mandal_code"
     
-    if m_code_col in df.columns and m_name_col in df.columns:
+    if m_code_col in df.columns:
         m_map = df.dropna(subset=[m_code_col, m_name_col]).groupby(m_code_col)[m_name_col].first().to_dict()
         df[m_name_col] = df[m_name_col].fillna(df[m_code_col].map(m_map))
     df['mandal'] = df.get(m_name_col, pd.Series(dtype=str)).fillna('Unknown')
