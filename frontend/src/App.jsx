@@ -13,28 +13,26 @@ function App() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    // In actual implementation, we will fetch from FastAPI /api/alerts
-    // For now we mock the data to build the UI components
-    setTimeout(() => {
-      setAlerts({
-        tier1: [
-          { id: 1, disease: 'Dengue', mandal: 'Tirupati Urban', cases: 42, startDate: '2026-04-20', severity: 'Critical Spike' }
-        ],
-        tier2: [
-          { id: 2, disease: 'Malaria', mandal: 'Visakhapatnam', cases: 18, startDate: '2026-04-22', severity: 'Rising Trend' },
-          { id: 3, disease: 'Gastroenteritis', mandal: 'Vijayawada', cases: 25, startDate: '2026-04-25', severity: 'Cluster Detected' }
-        ],
-        tier3: [
-          { id: 4, disease: 'Typhoid', mandal: 'Guntur', cases: 8, startDate: '2026-04-26', severity: 'Early Warning' }
-        ]
-      });
-      setMapData([
-        { mandal: 'Tirupati Urban', disease: 'Dengue', cases: 42, lat: 13.6288, lng: 79.4192 },
-        { mandal: 'Vijayawada', disease: 'Gastroenteritis', cases: 25, lat: 16.5062, lng: 80.6480 },
-        { mandal: 'Visakhapatnam', disease: 'Malaria', cases: 18, lat: 17.6868, lng: 83.2185 }
-      ]);
+    // Fetch live generated inputs from the python pipeline outputs via public assets
+    Promise.all([
+      fetch('/alerts.json').then(res => res.ok ? res.json() : null),
+      fetch('/spread_map.json').then(res => res.ok ? res.json() : null)
+    ])
+    .then(([alertsData, mapRes]) => {
+      if (alertsData) {
+        setAlerts(alertsData);
+      } else {
+        console.warn("alerts.json not found, pipeline might not have generated alerts");
+      }
+      if (mapRes) {
+        setMapData(mapRes);
+      }
       setLoading(false);
-    }, 1000);
+    })
+    .catch(err => {
+      console.error("Error loading frontend assets:", err);
+      setLoading(false);
+    });
   }, []);
 
   return (

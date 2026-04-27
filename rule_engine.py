@@ -80,9 +80,9 @@ def _eval_threshold_mandal(disease_data, rule, ref_date, ts_mandal_weekly, disea
                 else:
                     break # Outbreak chain broken
 
-        # Get top facilities for this mandal from historical disease_data
+        # Get top facilities for this mandal from recent outbreak period ONLY
         top_facilities_str = ""
-        m_rec = disease_data[disease_data["mandal"] == mandal]
+        m_rec = recent[recent["mandal"] == mandal]
         if not m_rec.empty and ("facility_name" in m_rec.columns or "facility_id" in m_rec.columns):
             fac_col = "facility_name" if "facility_name" in m_rec.columns else "facility_id"
             fac_counts = m_rec[fac_col].value_counts().head(3)

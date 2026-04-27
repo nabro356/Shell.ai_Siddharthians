@@ -54,9 +54,25 @@ def load_and_preprocess(filepaths=None):
             df[col] = np.nan
             
     # 1. Mandal Mapping
-    df["mandal_combined"] = df["sub_district"].fillna(df["mandal"])
-    m_name_col = "mandal_combined"
-    m_code_col = "sub_district_code" if "sub_district_code" in df.columns else "mandal_code"
+    if "sub_district" in df.columns and "mandal" in df.columns:
+        sub_is_code = df["sub_district"].astype(str).str.contains(r'\d', na=False).any()
+        mandal_is_code = df["mandal"].astype(str).str.contains(r'\d', na=False).any()
+        
+        if mandal_is_code and not sub_is_code:
+            m_code_col = "mandal"
+            m_name_col = "sub_district"
+            df["mandal"] = df["sub_district"] # Shift string to mandal column for ML
+        elif sub_is_code and not mandal_is_code:
+            m_code_col = "sub_district"
+            m_name_col = "mandal"
+        else:
+            df["mandal_combined"] = df["sub_district"].fillna(df["mandal"])
+            m_name_col = "mandal_combined"
+            m_code_col = "sub_district_code" if "sub_district_code" in df.columns else "mandal_code"
+    else:
+        df["mandal_combined"] = df.get("sub_district", df.get("mandal", pd.Series(dtype=str)))
+        m_name_col = "mandal_combined"
+        m_code_col = "sub_district_code" if "sub_district_code" in df.columns else "mandal_code"
     
     if m_code_col in df.columns:
         m_map = df.dropna(subset=[m_code_col, m_name_col]).groupby(m_code_col)[m_name_col].first().to_dict()
@@ -78,7 +94,8 @@ def load_and_preprocess(filepaths=None):
     diag_code_col = "diagnosis" if "diagnosis" in df.columns else "diagnosis_code"
     diag_name_col = "diagnosis_name"
     if diag_code_col in df.columns and diag_name_col in df.columns:
-        diag_map = df.dropna(subset=[diag_code_col, diag_name_col]).groupby(diag_code_col)[diag_name_col].first().to_dict()
+        # Map using the most frequent name for that code
+        diag_map = df.dropna(subset=[diag_code_col, diag_name_col]).groupby(diag_code_col)[diag_name_col].agg(lambda x: x.mode().iloc[0] if not x.mode().empty else x.iloc[0]).to_dict()
         df[diag_name_col] = df[diag_name_col].fillna(df[diag_code_col].map(diag_map))
         
     df['diagnosis_code'] = df.get(diag_code_col, pd.Series(dtype=str)).astype(str).str.strip()
@@ -339,8 +356,12 @@ def generate_frontend_assets(df, ts, forecasts):
     os.makedirs('frontend/public', exist_ok=True)
     
     # 1. Generating Spread Map coordinates intelligently
-    latest_cutoff = df['event_date'].max() - timedelta(days=28)
-    recent = df[df['event_date'] >= latest_cutoff]
+    if df.empty:
+        latest_cutoff = pd.Timestamp.now()
+        recent = df
+    else:
+        latest_cutoff = df['event_date'].max() - timedelta(days=28)
+        recent = df[df['event_date'] >= latest_cutoff]
     
     spread_map = []
     for (mandal, d_key), group in recent.groupby(['mandal', 'disease_key']):
@@ -352,6 +373,32 @@ def generate_frontend_assets(df, ts, forecasts):
                 "lat": float(group['latitude'].dropna().iloc[0]),
                 "lng": float(group['longitude'].dropna().iloc[0])
             })
+            
+    # Generate Alerts via Rule Engine
+    try:
+        from rule_engine import evaluate_rules
+        ts_weekly = df.groupby([pd.Grouper(key='event_date', freq='W-MON'), 'disease_key']).size().reset_index(name='case_count')
+        ts_weekly.rename(columns={'event_date': 'period'}, inplace=True)
+        alerts_df = evaluate_rules(df, ts_weekly, ts)
+        
+        alerts_by_tier = {"tier1": [], "tier2": [], "tier3": []}
+        for _, row in alerts_df.iterrows():
+            level = str(row['level'])
+            tier_key = "tier1" if level == "P0" else ("tier2" if level == "P1" else "tier3")
+            alerts_by_tier[tier_key].append({
+                "id": str(_),
+                "disease": row['disease'],
+                "mandal": row['mandal'],
+                "cases": int(row['cases']),
+                "startDate": row['onset_date'].strftime("%Y-%m-%d") if pd.notnull(row['onset_date']) else "",
+                "severity": row['rule_name'],
+                "facilities": row.get('facilities', '')
+            })
+            
+        with open('frontend/public/alerts.json', 'w') as f:
+            json.dump(alerts_by_tier, f, indent=2)
+    except Exception as e:
+        print(f"Failed generating alerts: {e}")
             
     # 2. Writing JSON payloads cleanly out to frontend
     with open('frontend/public/forecast_curves.json', 'w') as f:
