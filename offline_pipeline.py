@@ -95,11 +95,10 @@ def load_and_preprocess(filepaths=None):
     diag_code_col = "diagnosis" if "diagnosis" in df.columns else "diagnosis_code"
     diag_name_col = "diagnosis_name"
     if diag_code_col in df.columns and diag_name_col in df.columns:
-        # Map using the most frequent name for that code
         diag_map = df.dropna(subset=[diag_code_col, diag_name_col]).groupby(diag_code_col)[diag_name_col].agg(lambda x: x.mode().iloc[0] if not x.mode().empty else x.iloc[0]).to_dict()
         df[diag_name_col] = df[diag_name_col].fillna(df[diag_code_col].map(diag_map))
         
-    df['diagnosis_code'] = df.get(diag_code_col, pd.Series(dtype=str)).astype(str).str.strip()
+    df['diagnosis_code'] = df.get(diag_code_col, pd.Series(dtype=str)).astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
     df['event_date'] = pd.to_datetime(df.get('timestamp'), errors='coerce')
     
     # 4. Latitude and Longitude Fallback Mapping
@@ -124,17 +123,35 @@ def load_and_preprocess(filepaths=None):
     except Exception as e:
         print(f"[Warning] Could not map geospatial data: {e}")
     
-    # Filter only to tracked diseases via dict
+    # Filter only to tracked diseases via dict (SNOMED codes OR keyword mapping)
     tracked_codes = []
     code_to_disease = {}
+    disease_keywords = {}
     for d, info in DISEASE_CODES.items():
         if 'codes' in info:
             for code in info['codes']:
                 tracked_codes.append(str(code))
                 code_to_disease[str(code)] = d
+        if 'keywords' in info:
+            disease_keywords[d] = info['keywords']
+        else:
+            disease_keywords[d] = [info['name'].lower()]
             
-    df = df[df['diagnosis_code'].isin(tracked_codes)].copy()
     df['disease_key'] = df['diagnosis_code'].map(code_to_disease)
+    
+    # Fallback keyword matching for missing mapped disease keys 
+    if diag_name_col in df.columns:
+        missing_keys = df['disease_key'].isna() & df[diag_name_col].notna()
+        if missing_keys.any():
+            def match_disease(text):
+                t = str(text).lower()
+                for d_key, kw_list in disease_keywords.items():
+                    if any(kw in t for kw in kw_list):
+                        return d_key
+                return np.nan
+            df.loc[missing_keys, 'disease_key'] = df.loc[missing_keys, diag_name_col].apply(match_disease)
+            
+    df = df.dropna(subset=['disease_key']).copy()
     
     return df
 
