@@ -102,6 +102,28 @@ def load_and_preprocess(filepaths=None):
     df['diagnosis_code'] = df.get(diag_code_col, pd.Series(dtype=str)).astype(str).str.strip()
     df['event_date'] = pd.to_datetime(df.get('timestamp'), errors='coerce')
     
+    # 4. Latitude and Longitude Fallback Mapping
+    try:
+        geo_path = "ap_mandals_latlong.csv"
+        if os.path.exists(geo_path):
+            geo_df = pd.read_csv(geo_path)
+            
+            m_col = next((c for c in geo_df.columns if 'mandal' in str(c).lower()), geo_df.columns[0])
+            lat_col = next((c for c in geo_df.columns if 'lat' in str(c).lower()), None)
+            lon_col = next((c for c in geo_df.columns if 'lon' in str(c).lower() or 'lng' in str(c).lower()), None)
+            
+            if m_col and lat_col and lon_col:
+                lat_map = geo_df.groupby(m_col)[lat_col].first().to_dict()
+                lon_map = geo_df.groupby(m_col)[lon_col].first().to_dict()
+                
+                if "latitude" not in df.columns: df["latitude"] = np.nan
+                if "longitude" not in df.columns: df["longitude"] = np.nan
+                
+                df["latitude"] = df["latitude"].fillna(pd.to_numeric(df["mandal"].map(lat_map), errors='coerce'))
+                df["longitude"] = df["longitude"].fillna(pd.to_numeric(df["mandal"].map(lon_map), errors='coerce'))
+    except Exception as e:
+        print(f"[Warning] Could not map geospatial data: {e}")
+    
     # Filter only to tracked diseases via dict
     tracked_codes = []
     code_to_disease = {}
