@@ -25,7 +25,9 @@ Example:
 # =============================================================================
 # DISEASE CODE REGISTRY (SNOMED CT)
 # =============================================================================
-DISEASE_CODES = {
+from typing import Optional, List, Dict, Any
+
+DISEASE_CODES: Dict[str, Any] = {
     "malaria": {
         "name": "Malaria",
         "codes": ["735531008"],
@@ -164,17 +166,32 @@ DISEASE_CODES = {
             },
         ],
     },
-    "ebola": {
-        "name": "Ebola",
-        "codes": ["37109004"],
-        "category": "hemorrhagic",
+    "amoebasis": {
+        "name": "Amoebiasis",
+        "codes": ["387754006"],
+        "category": "waterborne",
         "alert_rules": [
             {
-                "level": "P0",
-                "name": "Any case",
-                "description": "ANY single case = immediate P0 alert (IDSP unusual syndrome)",
+                "level": "P2",
+                "name": "Cluster",
+                "description": "≥5 cases in a mandal in 1 week",
                 "type": "threshold_mandal",
-                "min_cases": 1,
+                "min_cases": 5,
+                "window_weeks": 1,
+            },
+        ],
+    },
+    "five_day_fever": {
+        "name": "Five Day Fever",
+        "codes": ["8221400"],
+        "category": "vector_borne",
+        "alert_rules": [
+            {
+                "level": "P2",
+                "name": "Cluster",
+                "description": "≥5 cases in a mandal in 1 week",
+                "type": "threshold_mandal",
+                "min_cases": 5,
                 "window_weeks": 1,
             },
         ],
@@ -360,7 +377,7 @@ def get_all_codes():
     return codes
 
 
-def code_to_disease(code: str) -> str:
+def code_to_disease(code: str) -> Optional[str]:
     """Maps a diagnosis code to its disease key. Returns None if not tracked."""
     for disease_key, disease_info in DISEASE_CODES.items():
         if code in disease_info["codes"]:
@@ -368,7 +385,7 @@ def code_to_disease(code: str) -> str:
     return None
 
 
-def code_to_disease_name(code: str) -> str:
+def code_to_disease_name(code: str) -> Optional[str]:
     """Maps a diagnosis code to its display name. Returns None if not tracked."""
     for disease_info in DISEASE_CODES.values():
         if code in disease_info["codes"]:
@@ -381,7 +398,7 @@ def get_disease_names():
     return {k: v["name"] for k, v in DISEASE_CODES.items()}
 
 
-def get_codes_for_disease(disease_key: str) -> list:
+def get_codes_for_disease(disease_key: str) -> List[str]:
     """Returns list of codes for a disease key."""
     if disease_key in DISEASE_CODES:
         return DISEASE_CODES[disease_key]["codes"]
