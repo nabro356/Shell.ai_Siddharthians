@@ -38,8 +38,12 @@ def load_and_clean(df: pd.DataFrame, verbose: bool = True) -> pd.DataFrame:
     # Only rename columns that exist in the DataFrame
     rename_map = {k: v for k, v in COLUMN_MAP.items() if k in df.columns}
     df = df.rename(columns=rename_map)
+    
+    # Crucial: Drop any duplicate columns generated if the dataset already contained the mapped keys
+    df = df.loc[:, ~df.columns.duplicated(keep='first')]
+    
     if verbose:
-        print(f"[2/7] Renamed {len(rename_map)} columns")
+        print(f"[2/7] Renamed {len(rename_map)} columns (deduplicated)")
 
     # --- Step 2: Filter to tracked diseases ---
     tracked_codes = get_all_codes()

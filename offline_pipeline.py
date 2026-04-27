@@ -174,12 +174,11 @@ def get_mandal_timeseries(df):
     # Fill missing weeks seamlessly with 0
     full_ts = []
     for (mandal, d_key), group in ts.groupby(['mandal', 'disease_key']):
-        min_p = group['period'].min()
-        max_p = group['period'].max()
+        min_p, max_p = group['period'].min(), group['period'].max()
         if pd.isna(min_p): continue
-            
         all_weeks = pd.date_range(min_p, max_p, freq='W-MON')
-        g_reindexed = group.set_index('period').reindex(all_weeks, fill_value=0).reset_index()
+        g_reindexed = group.groupby('period')['case_count'].sum().reindex(all_weeks, fill_value=0).reset_index()
+        g_reindexed.rename(columns={'index': 'period'}, inplace=True)
         g_reindexed['mandal'] = mandal
         g_reindexed['disease_key'] = d_key
         g_reindexed['district'] = group['district'].iloc[0] if len(group['district']) > 0 else 'Unknown'
