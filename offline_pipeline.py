@@ -365,11 +365,12 @@ def run_mandal_forecasts(ts_mandal, forecast_horizon=4):
         except: pass
 
         # --- Dynamic Selection Protocol ---
-        if not models_performance:
+        valid_models = {k: v for k, v in models_performance.items() if k in predictions_future}
+        if not valid_models:
             continue
             
         # The ultimate winner for this specific mandal is whichever model proved the lowest RMSE mathematically
-        best_model_name = min(models_performance, key=models_performance.get)
+        best_model_name = min(valid_models, key=valid_models.get)
         best_preds = predictions_future[best_model_name]
         
         last_date = dates[-1]
